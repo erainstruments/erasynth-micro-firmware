@@ -78,16 +78,15 @@
 #define MAXIMUM_DEVIATION 100000000000
 #define MINUMUM_PULSE 50
 
-#define DEFAULT_DELAY_AM 6
-#define DEFAULT_DELAY_FM 8
-
-#define offsetCalibration 0
+#define DEFAULT_DELAY_AM 6000 // nanosecond
+#define DEFAULT_DELAY_FM 5250 // nanosecond
 
 uint8_t ledState = LOW;
 
 uint32_t LMX_R0_reset = 0x00211E;
 uint32_t LMX_R0 = 0x00211C;
 uint32_t LMX_R0_ADDR_HOLD = 0x00291C;
+uint32_t LMX_R0_ADDR_HOLD_mute = 0x00291D;
 uint32_t LMX_R0_mute = 0x00211D;
 
 // Serial interface parameters
@@ -104,19 +103,21 @@ bool isModulationEnable = false;
 uint8_t modType = 0;
 uint8_t modInput = 0;
 uint8_t modWaveForm = 0;
-uint32_t modIntFreq = 1;
+uint32_t modIntFreq = 1000;
 
-uint8_t amDepth = 50;
-uint32_t fmDev = 40000;
-uint32_t pulseWidth = 2000;
-uint32_t pulsePeriod = 1000000;
+uint8_t amDepth = 99;
+uint32_t fmDev = 50000;
+uint32_t pulseWidth = 5000;
+uint32_t pulsePeriod = 10000;
 
-uint16_t modArray[maxSamplesNum];
+// 120 for internal 
+// 128 for external
+uint16_t modArray[maxSamplesNum + 8];
 uint32_t modDelayVal = 0;
 
 uint64_t sweepStartFrequency = 1e9;
 uint64_t sweepStopFrequency = 2e9;
-uint64_t sweepStepFrequency = 10e6;
+uint64_t sweepStepFrequency = 100e6;
 uint64_t sweepPoints = 100;
 uint32_t sweepDwellTime = 1000000;
 int sweepIndex = 0;
@@ -136,7 +137,7 @@ uint16_t eepromAddr = 0;
 bool isExtModAttch = false;
 float fskMultiplier = 0;
 bool nextFreq = false;
-char firmwareVersion[VERSION_SIZE] = "v1.0.6";
+char firmwareVersion[VERSION_SIZE] = "v1.0.7";
 bool isUploadCode = false;
 
 uint8_t decimationValue = 0;
@@ -176,7 +177,7 @@ void setup()
 
 	pinMode(dac1_LE, OUTPUT);
 	digitalWrite(dac1_LE, HIGH);
-
+	
 	//
 	// Load or Reset the EEPROM due to version difference
 	//
@@ -256,6 +257,11 @@ void setup()
 	TCCR1A = 0;
 	ICR1 = 62500;
 	TIMSK1 = _BV(TOIE1);
+	
+	// Setup ADC for Free Running Mode.Default is ADC 5
+	ADMUX = 0x45;
+	ADCSRA = 0xE1;
+	ADCSRB = 0x80;
 
 	if (isSweepOn) { setSweepParams(); }
 	if (isModulationEnable) { setModulationSettings(); }
@@ -284,11 +290,13 @@ void setDAC1(uint16_t value)
 	DAC[1] = (byte)value;			//LSB of DAC_Value
 	DAC[0] = (byte)(value >> 8);	//MSB of DAC_Value
 
+	cli();
 	SPI.beginTransaction(SPISettings(10e6, MSBFIRST, SPI_MODE1));
 	PORTD &= ~(1 << PORTD6);
 	SPI.transfer(DAC, 2);
 	PORTD |= (1 << PORTD6);
 	SPI.endTransaction();
+	sei();
 }
 
 void setMinAmplitude()
@@ -301,6 +309,8 @@ void setMinAmplitude()
 
 void setLMX(uint64_t freq)
 {
+	cli();
+	
 	Frequency = freq;
 	if (Frequency < MINUMUM_FREQUENCY) { Frequency = MINUMUM_FREQUENCY; }
 	if (Frequency > MAXIMUM_FREQUENCY) { Frequency = MAXIMUM_FREQUENCY; }
@@ -346,6 +356,12 @@ void setLMX(uint64_t freq)
 	if (DIVRAT == 1) { R45 = 0x2DCE01; }
 	R45 &= (LMXOutPwr | 0xFFFF00);
 
+	uint32_t r0 = isRFOnOff ? LMX_R0 : LMX_R0_mute;
+	if (isModulationEnable && modType == 1) 
+	{ 
+		r0 = isRFOnOff ? LMX_R0_ADDR_HOLD : LMX_R0_ADDR_HOLD_mute;
+	}
+
 	spiWrite_LMX(&R39);
 	spiWrite_LMX(&R38);
 	spiWrite_LMX(&R75);
@@ -353,10 +369,10 @@ void setLMX(uint64_t freq)
 	spiWrite_LMX(&R43);
 	spiWrite_LMX(&R42);
 	spiWrite_LMX(&R36);
-	spiWrite_LMX(&LMX_R0);
-	if (isModulationEnable && modType == 1) { spiWrite_LMX(&LMX_R0_ADDR_HOLD); }
+	spiWrite_LMX(&r0);
 
 	setAmplitude();
+	sei();
 }
 
 void setLMXPower()
@@ -389,11 +405,13 @@ void rfOnOff()
 void setRFSA3714(int value)
 {
 	valueofRFSA = value;
-	SPI.beginTransaction(SPISettings(5e6, LSBFIRST, SPI_MODE0));
+	cli();
+	SPI.beginTransaction(SPISettings(10e6, LSBFIRST, SPI_MODE0));
 	PORTD &= ~(1 << PORTD7);
 	SPI.transfer(value);
 	PORTD |= (1 << PORTD7);
 	SPI.endTransaction();
+	sei();
 }
 
 void setF2250(int value)
@@ -420,14 +438,14 @@ void startModulation()
 	if (isModulationEnable)
 	{
 		setModulationSettings();
+
 		if (modType == MODULATION_AM)
 		{
 			if (modInput == MODULATION_INTERNAL)
 			{
-				SPI.beginTransaction(SPISettings(10e6, MSBFIRST, SPI_MODE1));
-
 				while (isModulationEnable)
-				{
+				{					
+					SPI.beginTransaction(SPISettings(10e6, MSBFIRST, SPI_MODE1));
 					for (int i = 0; i < maxSamplesNum; i += decimationValue)
 					{
 						uint16_t value = modArray[i] << 2;
@@ -435,9 +453,8 @@ void startModulation()
 						SPI.transfer((uint8_t)(value >> 8));
 						SPI.transfer((uint8_t)value);
 						PORTD |= (1 << PORTD6);
-						delay_micro(modDelayVal);
+						delayNanoseconds(modDelayVal);
 					}
-
 					if (nextFreq) { sweep(); }
 					if (Serial.available() || Serial1.available()) { break; }
 				}
@@ -447,16 +464,17 @@ void startModulation()
 			}
 			else if (modInput == MODULATION_EXTERNAL || modInput == MODULATION_MICROPHONE) // External
 			{
+				ADMUX = modInput == MODULATION_EXTERNAL ? 0x47 : 0x46;
+				ADCSRA = 0xE2;
+
 				SPI.beginTransaction(SPISettings(10e6, MSBFIRST, SPI_MODE1));
 
 				float volt = (float)valueOfDAC * (3.3 / 4096.0);
 				volt = ((volt - 0.8) * 30) + 5;
 
-				while (isModulationEnable)
+				for (uint8_t i = 0; i < (maxSamplesNum + 8); i++) 
 				{
-					if (Serial.available() || Serial1.available()) { break; }
-
-					float sample = (5.0 / 1024.0) * analogRead((modInput == MODULATION_EXTERNAL ? extPin : micPin));
+					float sample = (5.0 / 1024.0) * i * 8;
 					sample -= 2.5; // substract the 2.5V offset
 					sample /= 5; // Scale down to 1V
 					sample *= ((float)amDepth / 100.0);
@@ -467,7 +485,19 @@ void startModulation()
 					sample = (10 - sample + volt) * (1.0 / 30.0);
 					sample = (sample + 0.65) / (3.3 / 4096.0);
 
-					uint16_t value = ((uint16_t)sample) << 2;
+					modArray[i] = ((uint16_t)sample) << 2;
+				}
+
+				while (isModulationEnable)
+				{
+					if (Serial.available() || Serial1.available()) { break; }
+					if (nextFreq) { sweep(); SPI.beginTransaction(SPISettings(10e6, MSBFIRST, SPI_MODE1)); }
+					while (!(ADCSRA & (1 << ADIF)));
+
+					//uint16_t sample = (ADCL | (ADCH << 8));
+					//uint16_t value = modArray[sample >> 3];
+					uint16_t value = modArray[(ADCL >> 3) | (ADCH << 5)];
+
 					PORTD &= ~(1 << PORTD6);
 					SPI.transfer((uint8_t)(value >> 8));
 					SPI.transfer((uint8_t)value);
@@ -487,16 +517,19 @@ void startModulation()
 
 				while (isModulationEnable)
 				{
+					PORTB &= ~(1 << PORTB4);
+					SPI.transfer(FSK_ADDRESS);
+
 					for (int i = 0; i < maxSamplesNum; i += decimationValue)
 					{
-						PORTB &= ~(1 << PORTB4);
-						SPI.transfer(FSK_ADDRESS);
 						SPI.transfer((uint8_t)(modArray[i] >> 8));
 						SPI.transfer((uint8_t)modArray[i]);
-						PORTB |= (1 << PORTB4);
-						delay_micro(modDelayVal);
+						delayNanoseconds(modDelayVal);
 					}
-					if (nextFreq) { sweep(); }
+
+					PORTB |= (1 << PORTB4);
+
+					if (nextFreq) { sweep(); setModulationSettings(); }
 					if (Serial.available() || Serial1.available()) { break; }
 				}
 
@@ -509,18 +542,20 @@ void startModulation()
 			}
 			else if (modInput == MODULATION_EXTERNAL || modInput == MODULATION_MICROPHONE) // External
 			{
-				spiWrite_LMX(LMX_R0_ADDR_HOLD);
+				ADMUX = modInput == MODULATION_EXTERNAL ? 0x47 : 0x46;
+				ADCSRA = 0xE2;
+				
 				SPI.beginTransaction(SPISettings(10e6, MSBFIRST, SPI_MODE0));
 				PORTB &= ~(1 << PORTB4);
 				SPI.transfer(FSK_ADDRESS);
-				while (isModulationEnable)
-				{
-					if (Serial.available() || Serial1.available()) { break; }
+				
+				uint64_t fmDev_scaled = fmDev / (5.0 / 1024.0);
+				uint64_t fskMultiplier_scaled = fskMultiplier / (5.0 / 1024.0);
 
-					// Read external input
-					int m = analogRead((modInput == MODULATION_EXTERNAL ? extPin : micPin));
-					float micVal = (5.0 / 1024.0) * m;
-					micVal -= (2.5 + (modInput == MODULATION_EXTERNAL ? offsetCalibration : 0)); // substract the 2.5V offset
+				for (uint8_t i = 0; i < (maxSamplesNum + 8); i++)
+				{
+					float micVal = (5.0 / 1024.0) * i * 8;
+					micVal -= 2.5;
 					micVal /= 2.5; // Scale down to 1V
 					micVal *= (float)fmDev;
 
@@ -529,11 +564,27 @@ void startModulation()
 					if (micVal < 0) { fskValue = (65536 + ((uint16_t)round(micVal * fskMultiplier))); }
 					else { fskValue = ((uint16_t)round(micVal * fskMultiplier)); }
 
+					modArray[i] = fskValue;
+				}
+
+				while (isModulationEnable)
+				{
+					if (Serial.available() || Serial1.available() || nextFreq) { break; }
+					
+					while (!(ADCSRA & (1 << ADIF)));
+					// Read external input
+					uint16_t m = ADCL | (ADCH << 8);
+
+					uint16_t fskValue = modArray[m >> 3];
+
 					SPI.transfer((uint8_t)(fskValue >> 8));
 					SPI.transfer((uint8_t)fskValue);
 				}
+				
 				PORTB |= (1 << PORTB4);
 				SPI.endTransaction();
+
+				if (nextFreq) { sweep(); }
 
 				// Write FSK Disable
 				uint32_t R114 = 0x727C03 & 0xFFFBFF;
@@ -548,7 +599,8 @@ void startModulation()
 				detachInterrupt(digitalPinToInterrupt(trigPin));
 				isExtModAttch = false;
 
-				uint32_t offTime = pulsePeriod - pulseWidth - 40; // default delay  
+				uint32_t offTime = pulsePeriod - pulseWidth - 15; // 15 is default delay because of transactions
+				uint32_t waitTime = pulseWidth - 10; // 10 is default delay because of transactions
 				uint16_t dac = valueOfDAC;
 				uint8_t rfsa = valueofRFSA;
 
@@ -556,12 +608,13 @@ void startModulation()
 				{
 					setDAC1(dac);
 					setRFSA3714(rfsa);
-					delay_micro(pulseWidth);
+					delay_micro(waitTime);
 					
 					setDAC1(4095);
 					setRFSA3714(127);
 					delay_micro(offTime);
 					
+					if (nextFreq) { sweep(); }
 					if (Serial.available() || Serial1.available()) { break; }
 				}
 				setAmplitude();
@@ -576,13 +629,15 @@ void startModulation()
 
 void pulse_rising()
 {
+	if (nextFreq) { sweep(); }
 	setF2250(valueOfDAC);
 	setRFSA3714(valueofRFSA);
 	attachInterrupt(digitalPinToInterrupt(trigPin), pulse_falling, FALLING);
-}
+}          
 
 void pulse_falling()
 {
+	if (nextFreq) { sweep(); }
 	byte DAC[2] = { 0 };
 
 	uint16_t value = 4095 << 2;
@@ -596,7 +651,7 @@ void pulse_falling()
 	PORTD |= (1 << PORTD6);
 	SPI.endTransaction();
 
-	SPI.beginTransaction(SPISettings(5e6, LSBFIRST, SPI_MODE0));
+	SPI.beginTransaction(SPISettings(10e6, LSBFIRST, SPI_MODE0));
 	PORTD &= ~(1 << PORTD7);
 	SPI.transfer(127);
 	PORTD |= (1 << PORTD7);
@@ -638,8 +693,8 @@ void setModulationSettings()
 	if (modType == MODULATION_AM)
 	{
 		decimationValue = ceil((float)modIntFreq / 1000.0);
-		float delayAmount = (1e6 / (modIntFreq * ceil((float)maxSamplesNum / decimationValue)));
-		modDelayVal = (delayAmount - DEFAULT_DELAY_AM) < 0 ? 0 : round(delayAmount - DEFAULT_DELAY_AM);
+		float delayAmount = (1e9 / (modIntFreq * ceil((float)maxSamplesNum / decimationValue)));
+		modDelayVal = ((delayAmount - DEFAULT_DELAY_AM) < 0 ? 0 : round(delayAmount - DEFAULT_DELAY_AM)) / 250;
 
 		float v[maxSamplesNum];
 		for (int i = 0; i < maxSamplesNum; i++)
@@ -683,7 +738,7 @@ void setModulationSettings()
 		spiWrite_LMX(&R0);
 
 		float samples[maxSamplesNum];
-
+		
 		for (int i = 0; i < maxSamplesNum; i++)
 		{
 			samples[i] = ((getWaveform(i) * (1.0 / 4096.0)) - 0.5) * 2 * fmDev;
@@ -696,37 +751,19 @@ void setModulationSettings()
 			else { modArray[i] = (round(samples[i] * fskMultiplier)); }
 		}
 
-		// Calulate the sampling period 
+		// Calculate the sampling period 
 		decimationValue = ceil((float)modIntFreq / 1000.0);
-		float delayAmount = (1e6 / (modIntFreq * ceil((float)maxSamplesNum / decimationValue)));
-		modDelayVal = (delayAmount - DEFAULT_DELAY_FM) < 0 ? 0 : round(delayAmount - DEFAULT_DELAY_FM);
+		//decimationValue = 4;
+		float delayAmount = (1e9 / (modIntFreq * ceil((float)maxSamplesNum / decimationValue)));
+		modDelayVal = ((delayAmount - DEFAULT_DELAY_FM) < 0 ? 0 : round(delayAmount - DEFAULT_DELAY_FM)) / 250;
 	}
-}
 
-void sweepInterrupt()
-{
-	if (isModulationEnable) { nextFreq = true; }
-	else { sweep(); }
-}
-
-void sweep()
-{
-	nextFreq = false;
-	setLMX(sweepStartFrequency + (sweepStepFrequency * sweepIndex));
-	if (sweepStartFrequency > sweepStopFrequency)
-	{
-		sweepIndex--;
-		if (abs(sweepIndex) > sweepPoints) { sweepIndex = 0; }
-	}
-	else
-	{
-		sweepIndex++;
-		if (sweepIndex > sweepPoints) { sweepIndex = 0; }
-	}
+	if (isSweepOn) { setSweepParams(); }
 }
 
 float getTemp()
 {
+	cli();
 	SPI.beginTransaction(SPISettings(EXTERNAL_EEPROM_MAX_CLOCK, MSBFIRST, SPI_MODE0));
 	digitalWrite(temp_LE, LOW);
 	uint8_t a1 = SPI.transfer(0x00);
@@ -735,12 +772,18 @@ float getTemp()
 	SPI.endTransaction();
 
 	int a3 = ((a1 << 8) | (a2 & (0xF8))) >> 3;
+	sei();
 	return (float)a3 * 0.0625;
 }
 
 float getCurrent()
 {
-	int val = analogRead(currentPin);
+	ADMUX = 0x45;
+	ADCSRA = 0xE7;
+
+	while (!(ADCSRA & (1 << ADIF)));
+
+	int val = ADCL | (ADCH << 8);
 	return (5.0 / 1024.0) * val / 20 / 0.3;
 }
 
@@ -752,6 +795,7 @@ void blinkLed()
 
 void spiWrite_LMX(uint32_t* data_u32)
 {
+	cli();
 	SPI.beginTransaction(SPISettings(10e6, MSBFIRST, SPI_MODE0));
 	digitalWrite(lmx_LE, LOW);
 	SPI.transfer(((uint8_t*)data_u32)[2]);
@@ -759,10 +803,12 @@ void spiWrite_LMX(uint32_t* data_u32)
 	SPI.transfer(((uint8_t*)data_u32)[0]);
 	digitalWrite(lmx_LE, HIGH);
 	SPI.endTransaction();
+	sei();
 }
 
 void spiWrite_FSK(uint16_t* data_u16)
 {
+	cli();
 	SPI.beginTransaction(SPISettings(10e6, MSBFIRST, SPI_MODE0));
 	digitalWrite(lmx_LE, LOW);
 	SPI.transfer(FSK_ADDRESS);
@@ -770,6 +816,7 @@ void spiWrite_FSK(uint16_t* data_u16)
 	SPI.transfer(((uint8_t*)data_u16)[0]);
 	digitalWrite(lmx_LE, HIGH);
 	SPI.endTransaction();
+	sei();
 }
 
 void handleSerial()
@@ -836,10 +883,43 @@ uint64_t get64Bit(char *input)
 	return result;
 }
 
+void uint64ToString(uint64_t input, char* chr)
+{
+	unsigned char tmp = 0;
+	uint8_t index = 0;
+
+	chr[0] = '\0';
+
+	do {
+		tmp = input % 10;
+		input /= 10;
+
+		if (tmp < 10)
+			tmp += '0';
+		else
+			tmp += 'A' - 10;
+
+		index++;
+		strncat(chr, &tmp, 1);
+	} while (input);
+
+	strrev(chr);
+}
+
 void delay_micro(uint32_t val)
 {
 	if (val < 16000) { delayMicroseconds(val); }
 	else { delay(val / 1000); }
+}
+
+void delayNanoseconds(unsigned int it) // Delay = (250 x it) ns
+{
+	// busy wait
+	__asm__ __volatile__(
+		"1: sbiw %0,1" "\n\t" // 2 cycles
+		"brne 1b" : "=w" (it) : "0" (it) // 2 cycles
+	);
+	// return = 4 cycles
 }
 
 void command(char* commandBuffer)
@@ -968,6 +1048,13 @@ void command(char* commandBuffer)
 				}
 			}
 			fskMultiplier = getFSKMultiplier();
+		
+			if (isModulationEnable)
+			{
+				detachInterrupt(digitalPinToInterrupt(trigPin));
+				isExtModAttch = false;
+				setModulationSettings();
+			}
 		}
 		else if (commandBuffer[2] == 'P')
 		{
@@ -1026,6 +1113,7 @@ void command(char* commandBuffer)
 				TIMSK3 = 0;
 				TCNT3 = 0;
 				sweepIndex = 0;
+				isExtModAttch = false;
 				detachInterrupt(digitalPinToInterrupt(trigPin));
 				setSweepParams();
 			}
@@ -1187,7 +1275,7 @@ void command(char* commandBuffer)
 			Serial1.print("t0.txt=\"");
 			Serial1.print(t, 1);
 			Serial1.print("C / ");
-			t *= (9 / 5);
+			t *= (float)(9.0 / 5.0);
 			t += 32;
 			Serial1.print(t, 1);
 			Serial1.print("F");
@@ -1487,7 +1575,7 @@ void command(char* commandBuffer)
 		command(">SMW0"); // Modulation waveform is Sine
 		command(">SMF1000"); // Modulation Internal Frequency is 1KHz
 		command(">SMFD50000"); // Modulation FM Deviation 50KHz
-		command(">SMA50"); // AM Depth is 50%
+		command(">SMA99"); // AM Depth is 99%
 		command(">SMPP10000"); // Pulse Period is 10ms
 		command(">SMPW5000"); // Pulse Width is 5ms
 		command(">SEL0"); // Remember last settings on start is off
@@ -1517,29 +1605,6 @@ void sendLCDCommand(char* input)
 	Serial1.write(0xFF);
 	Serial1.write(0xFF);
 	delay(5);
-}
-
-void uint64ToString(uint64_t input, char* chr)
-{
-	unsigned char tmp = 0;
-	uint8_t index = 0;
-
-	chr[0] = '\0';
-
-	do {
-		tmp = input % 10;
-		input /= 10;
-
-		if (tmp < 10)
-			tmp += '0';
-		else
-			tmp += 'A' - 10;
-
-		index++;
-		strncat(chr, &tmp, 1);
-	} while (input);
-
-	strrev(chr);
 }
 
 void vibrate()
@@ -1624,6 +1689,74 @@ void setAmplitude()
 	setLMXPower();
 	setF2250(f2250);
 	setRFSA3714(rfsa);
+}
+
+void setSweepParams()
+{
+	if (sweepStopFrequency < sweepStartFrequency)
+	{
+		sweepPoints = (sweepStartFrequency - sweepStopFrequency) / sweepStepFrequency;
+	}
+	else
+	{
+		sweepPoints = (sweepStopFrequency - sweepStartFrequency) / sweepStepFrequency;
+	}
+
+	if (isModulationEnable && modType == MODULATION_PULSE && modInput == MODULATION_EXTERNAL) 
+	{
+		if (!isExtModAttch) { attachInterrupt(digitalPinToInterrupt(trigPin), pulse_rising, RISING); isExtModAttch = true; }
+	}
+
+	if (sweepType == 0)
+	{
+		TCCR3B = _BV(WGM33);
+		TCCR3A = 0;
+		if (sweepDwellTime < 8192) { TCCR3B |= _BV(CS30); ICR3 = sweepDwellTime * 8; }
+		else if (sweepDwellTime < 65536) { TCCR3B |= _BV(CS31); ICR3 = sweepDwellTime; }
+		else if (sweepDwellTime < 524288) { TCCR3B |= _BV(CS31) | _BV(CS30); ICR3 = sweepDwellTime / 8; }
+		else if (sweepDwellTime < 2097152) { TCCR3B |= _BV(CS32); ICR3 = sweepDwellTime / 32; }
+		else if (sweepDwellTime < 8388608) { TCCR3B |= _BV(CS32) | _BV(CS30); ICR3 = sweepDwellTime / 128; }
+		else { TCCR3B |= _BV(CS32) | _BV(CS30);  ICR3 = 65535; }
+		TIMSK3 = _BV(TOIE3);
+	}
+	else
+	{
+		attachInterrupt(digitalPinToInterrupt(trigPin), sweepInterrupt, RISING);
+	}
+}
+
+void sweepInterrupt()
+{
+	if (isModulationEnable && !(modType == MODULATION_PULSE && modInput == MODULATION_EXTERNAL) ) { nextFreq = true; }
+	else { sweep(); }
+}
+
+void sweep()
+{
+	cli();
+	nextFreq = false;
+	setLMX(sweepStartFrequency + (sweepStepFrequency * sweepIndex));
+	if (sweepStartFrequency > sweepStopFrequency)
+	{
+		sweepIndex--;
+		if (abs(sweepIndex) > sweepPoints || (sweepStepFrequency > abs(sweepStartFrequency- sweepStopFrequency))) { sweepIndex = 0; }
+	}
+	else
+	{
+		sweepIndex++;
+		if (sweepIndex > sweepPoints || (sweepStepFrequency > abs(sweepStartFrequency - sweepStopFrequency))) { sweepIndex = 0; }
+	}
+	sei();
+}
+
+ISR(TIMER1_OVF_vect)
+{
+	blinkLed();
+}
+
+ISR(TIMER3_OVF_vect)
+{
+	sweepInterrupt();
 }
 
 void eepromLoad()
@@ -1723,6 +1856,7 @@ void eepromClear()
 
 uint8_t readFromExEEPROM(uint16_t address)
 {
+	cli();
 	SPI.beginTransaction(SPISettings(EXTERNAL_EEPROM_MAX_CLOCK, MSBFIRST, SPI_MODE0));
 	digitalWrite(eeprom_LE, LOW);
 	SPI.transfer(EXTERNAL_EEPROM_READ);
@@ -1731,11 +1865,13 @@ uint8_t readFromExEEPROM(uint16_t address)
 	uint8_t a1 = SPI.transfer(0x00);
 	digitalWrite(eeprom_LE, HIGH);
 	SPI.endTransaction();
+	sei();
 	return a1;
 }
 
 void readFromExEEPROM(uint16_t address, uint8_t *ptr)
 {
+	cli();
 	SPI.beginTransaction(SPISettings(EXTERNAL_EEPROM_MAX_CLOCK, MSBFIRST, SPI_MODE0));
 	digitalWrite(eeprom_LE, LOW);
 	SPI.transfer(EXTERNAL_EEPROM_READ);
@@ -1746,10 +1882,12 @@ void readFromExEEPROM(uint16_t address, uint8_t *ptr)
 	*ptr = SPI.transfer(0x00);
 	digitalWrite(eeprom_LE, HIGH);
 	SPI.endTransaction();
+	sei();
 }
 
 void writeToExEEPROM(uint16_t address, uint8_t data)
 {
+	cli();
 	SPI.beginTransaction(SPISettings(EXTERNAL_EEPROM_MAX_CLOCK, MSBFIRST, SPI_MODE0));
 	// SEND WRITE ENABLE FIRST
 	digitalWrite(eeprom_LE, LOW);
@@ -1762,44 +1900,6 @@ void writeToExEEPROM(uint16_t address, uint8_t data)
 	SPI.transfer((uint8_t)(address));
 	SPI.transfer(data);
 	digitalWrite(eeprom_LE, HIGH);
+	sei();
 	delay(10);
-}
-
-void setSweepParams()
-{
-	if (sweepStopFrequency < sweepStartFrequency)
-	{
-		sweepPoints = (sweepStartFrequency - sweepStopFrequency) / sweepStepFrequency;
-	}
-	else
-	{
-		sweepPoints = (sweepStopFrequency - sweepStartFrequency) / sweepStepFrequency;
-	}
-
-	if (sweepType == 0)
-	{
-		TCCR3B = _BV(WGM33);
-		TCCR3A = 0;
-		if (sweepDwellTime < 8192) { TCCR3B |= _BV(CS30); ICR3 = sweepDwellTime * 8; }
-		else if (sweepDwellTime < 65536) { TCCR3B |= _BV(CS31); ICR3 = sweepDwellTime; }
-		else if (sweepDwellTime < 524288) { TCCR3B |= _BV(CS31) | _BV(CS30); ICR3 = sweepDwellTime / 8; }
-		else if (sweepDwellTime < 2097152) { TCCR3B |= _BV(CS32); ICR3 = sweepDwellTime / 32; }
-		else if (sweepDwellTime < 8388608) { TCCR3B |= _BV(CS32) | _BV(CS30); ICR3 = sweepDwellTime / 128; }
-		else { TCCR3B |= _BV(CS32) | _BV(CS30);  ICR3 = 65535; }
-		TIMSK3 = _BV(TOIE3);
-	}
-	else
-	{
-		attachInterrupt(digitalPinToInterrupt(trigPin), sweepInterrupt, RISING);
-	}
-}
-
-ISR(TIMER1_OVF_vect)
-{
-	blinkLed();
-}
-
-ISR(TIMER3_OVF_vect)
-{
-	sweepInterrupt();
 }

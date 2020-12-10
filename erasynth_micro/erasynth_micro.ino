@@ -120,7 +120,7 @@ uint64_t sweepStopFrequency = 2e9;
 uint64_t sweepStepFrequency = 100e6;
 uint64_t sweepPoints = 100;
 uint32_t sweepDwellTime = 1000000;
-int sweepIndex = 0;
+int32_t sweepIndex = 0;
 uint8_t sweepType = 0;
 bool isSweepOn = false;
 
@@ -137,7 +137,7 @@ uint16_t eepromAddr = 0;
 bool isExtModAttch = false;
 float fskMultiplier = 0;
 bool nextFreq = false;
-char firmwareVersion[VERSION_SIZE] = "v1.0.7";
+char firmwareVersion[VERSION_SIZE] = "v1.0.8";
 bool isUploadCode = false;
 
 uint8_t decimationValue = 0;
